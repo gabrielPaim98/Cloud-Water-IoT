@@ -1,21 +1,31 @@
 package br.ucsal;
 
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpServer;
 import okhttp3.*;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
+import org.json.simple.parser.JSONParser;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Scanner;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 
 public class MainIot {
     private static final int MIN_15 = 900000;
     private static final int MIN_3 = 180000;
+    private static final int MIN_1 = 60000;
     private static final int SEC_30 = 30000;
 
     private final Scanner scanner = new Scanner(System.in);
@@ -23,6 +33,9 @@ public class MainIot {
     private String serial;
     private ServerSocket socket;
     private List<AuxDevice> deviceList = new ArrayList<AuxDevice>();
+
+    private HttpServer server;
+    ThreadPoolExecutor threadPoolExecutor = (ThreadPoolExecutor) Executors.newFixedThreadPool(10);
 
     MainIot(String serial) {
         this.serial = serial;
@@ -43,19 +56,14 @@ public class MainIot {
     public void start() {
         try {
             this.socket = new ServerSocket(64200, 1);
-            String url = this.getIpAddress() + ":" + this.getPort();
-            System.out.println("MainIot executando em: " + url);
+            createServer();
 
-            /*
-            {
-                main_iot_serial: "7bd4",
-                link: "http://127.0.0.1:8080"
-            }
-            */
-            JSONObject json = new JSONObject();
-            json.put("main_iot_serial", this.serial);
-            json.put("link", url);
-            sendPost(json, "updateIotLink");
+            String iotUrl = this.getIotIpAddress() + ":" + this.getIotPort();
+            String serverUrl = this.getServerIpAddress() + ":" + this.getServerPort();
+
+            System.out.println("MainIot executando em: " + iotUrl);
+            System.out.println("MainIotServer executando em: " + serverUrl);
+
             menu();
         } catch (Exception e) {
             System.out.println("Error start");
@@ -63,15 +71,32 @@ public class MainIot {
         }
     }
 
+    public void createServer() {
+        try {
+            server = HttpServer.create(new InetSocketAddress("localhost", 64201), 0);
+            server.createContext("/faucet", new MyHttpHandler());
+            server.setExecutor(threadPoolExecutor);
+            server.start();
+
+        } catch (Exception e) {
+            System.out.println("Error creating server");
+            e.printStackTrace();
+        }
+
+    }
+
     public void menu() {
         try {
             while (true) {
                 System.out.println("1- Adicionar novo dispositivo auxiliar");
-                System.out.println("2- Sair");
+                System.out.println("2- Atualizar link ngrok");
+                System.out.println("3- Sair");
                 int selectedOption = scanner.nextInt();
                 if (selectedOption == 1) {
                     addAuxDevice();
                 } else if (selectedOption == 2) {
+                    updateServerLink();
+                } else if (selectedOption == 3) {
                     work();
                     break;
                 } else {
@@ -84,50 +109,23 @@ public class MainIot {
         }
     }
 
-    public void work() {
-
-        Thread serverThread = new Thread() {
-            @Override
-            public void run() {
-                super.run();
-                try {
-                    while (true) {
-                        String faucetStatus;
-                        if (isFaucetOn) {
-                            faucetStatus = "Ligada";
-                        } else {
-                            faucetStatus = "Desligada";
-                        }
-                        System.out.println("Aguardando conexão do servidor (torneira " + faucetStatus + ")");
-                        try {
-                            Socket serverSocket = socket.accept();
-                            System.out.println("Conectado ao server: " + serverSocket.getInetAddress().getHostAddress() + ":" + serverSocket.getPort());
-                            if (serverSocket.getInetAddress().getHostAddress().equals("127.0.0.1")) { //TODO: modificar para ip do server
-                                serverSocket.close();
-                                continue;
-                            }
-                            String message = null;
-                            BufferedReader in = new BufferedReader(new InputStreamReader(serverSocket.getInputStream()));
-                            while ((message = in.readLine()) != null) {
-                                System.out.println("Nova mensagem: " + message);
-                                if (message.contains("FAUCET_STATUS ON")) {
-                                    isFaucetOn = true;
-                                } else if (message.contains("FAUCET_STATUS OFF")) {
-                                    isFaucetOn = false;
-                                }
-                            }
-                        } catch (Exception e) {
-                            System.out.println("Conexão com servidor perdida");
-                        }
-                    }
-                } catch (Exception e) {
-                    System.out.println("Error serverThread");
-                    e.printStackTrace();
-                }
+    public void updateServerLink() {
+        /*
+            {
+                main_iot_serial: "7bd4",
+                link: "http://127.0.0.1:8080"
             }
-        };
-        serverThread.start();
+            */
+        System.out.println("Informe o link do ngrok");
+        String ngrok = scanner.next();
 
+        JSONObject json = new JSONObject();
+        json.put("main_iot_serial", this.serial);
+        json.put("link", ngrok);
+        sendPost(json, "updateIotLink");
+    }
+
+    public void work() {
         Thread updateThread = new Thread() {
             @Override
             public void run() {
@@ -136,8 +134,7 @@ public class MainIot {
                     while (true) {
                         updateLastSoilRead();
                         updateServer();
-//                        Thread.sleep(SEC_30);
-                        Thread.sleep(MIN_15);
+                        Thread.sleep(MIN_3);
                     }
                 } catch (Exception e) {
                     System.out.println("Error serverThread");
@@ -232,7 +229,8 @@ public class MainIot {
         RequestBody formBody = FormBody.create(JSON, json.toJSONString());
 
         Request request = new Request.Builder()
-                .url("http://localhost:5001/cloud-water-ac2cb/us-central1/" + route) //TODO: mudar url
+//                .url("http://localhost:5001/cloud-water-ac2cb/us-central1/" + route) //TODO: url local
+                .url("https://us-central1-cloud-water-ac2cb.cloudfunctions.net/" + route) //TODO: url prd
                 .post(formBody)
                 .build();
 
@@ -241,17 +239,113 @@ public class MainIot {
             if (!response.isSuccessful()) throw new IOException("Unexpected code " + response);
 
             // Get response body
-            System.out.println("resposta do server" + response.body().string());
+            System.out.println("resposta do server: " + response.body().string());
         } catch (Exception e) {
             System.out.println("Error sendPost");
         }
     }
 
-    public String getIpAddress() {
+    public String getIotIpAddress() {
         return this.socket.getInetAddress().getHostAddress();
     }
 
-    public int getPort() {
+    public int getIotPort() {
         return this.socket.getLocalPort();
+    }
+
+    public String getServerIpAddress() {
+        return this.server.getAddress().getAddress().getHostAddress();
+    }
+
+    public int getServerPort() {
+        return this.server.getAddress().getPort();
+    }
+
+    private class MyHttpHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange httpExchange) throws IOException {
+            String requestParamValue = null;
+            if ("GET".equals(httpExchange.getRequestMethod())) {
+                requestParamValue = handleGetRequest(httpExchange);
+            } else if ("POST".equals(httpExchange.getRequestMethod())) {
+                requestParamValue = handlePostRequest(httpExchange);
+            }
+            handleResponse(httpExchange, requestParamValue);
+        }
+
+        private String handleGetRequest(HttpExchange httpExchange) {
+            /*return httpExchange.
+                    getRequestURI()
+                    .toString()
+                    .split("\\?")[1]
+                    .split("=")[1];*/
+            return null;
+        }
+
+        private String handlePostRequest(HttpExchange httpExchange) {
+            String data = null;
+            try {
+                InputStreamReader isr = new InputStreamReader(httpExchange.getRequestBody(), StandardCharsets.UTF_8);
+                BufferedReader br = new BufferedReader(isr);
+
+                int b;
+                StringBuilder buf = new StringBuilder(512);
+                while ((b = br.read()) != -1) {
+                    buf.append((char) b);
+                }
+
+                data = buf.toString();
+                JSONParser parser = new JSONParser();
+                JSONObject json = (JSONObject) parser.parse(data);
+                String jsonStatus = (String) json.get("status");
+                if (jsonStatus == null) {
+                    System.out.println("No status found for json " + data);
+                    return null;
+                }
+                String oldStatus;
+                String newStatus;
+                if (isFaucetOn) {
+                    oldStatus = "Ligada";
+                } else {
+                    oldStatus = "Desligada";
+                }
+                if (jsonStatus.equalsIgnoreCase("on")) {
+                    isFaucetOn = true;
+                    newStatus = "Ligada";
+                } else {
+                    isFaucetOn = false;
+                    newStatus = "Desligada";
+                }
+                System.out.println("Novo comando do servidor " + oldStatus + " -> " + newStatus);
+
+                br.close();
+                isr.close();
+            } catch (Exception e) {
+                System.out.println("Error handling post");
+                e.printStackTrace();
+            }
+            return data;
+        }
+
+        private void handleResponse(HttpExchange httpExchange, String requestParamValue) throws IOException {
+            OutputStream outputStream = httpExchange.getResponseBody();
+            String response;
+            int responseCode;
+
+            if (requestParamValue == null) {
+                responseCode = 400;
+                response = "Failed to update faucet status";
+            } else {
+                responseCode = 200;
+                response = "Faucet status updated";
+            }
+
+//            httpExchange.getResponseHeaders().set("Content-Type", "application/json");
+            httpExchange.sendResponseHeaders(responseCode, response.length());
+
+            outputStream.write(response.getBytes());
+            outputStream.flush();
+            outputStream.close();
+        }
     }
 }
